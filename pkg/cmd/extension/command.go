@@ -5,6 +5,7 @@ import (
 	"fmt"
 	gio "io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,6 +45,9 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 
 			An extension cannot override any of the core gh commands. If an extension name conflicts
 			with a core gh command, you can use %[1]sgh extension exec <extname>%[1]s.
+
+			When an extension is executed, gh will check for new versions once every 24 hours and display
+			an upgrade notice. See %[1]sgh help environment%[1]s for information on disabling extension notices.
 
 			For the list of available extensions, see <https://github.com/topics/gh-extension>.
 		`, "`"),
@@ -292,19 +296,35 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 				Use:   "install <repository>",
 				Short: "Install a gh extension from a repository",
 				Long: heredoc.Docf(`
-					Install a GitHub repository locally as a GitHub CLI extension.
+					Install a GitHub CLI extension from a GitHub or local repository.
 
-					The repository argument can be specified in %[1]sOWNER/REPO%[1]s format as well as a full URL.
+					For GitHub repositories, the repository argument can be specified in %[1]sOWNER/REPO%[1]s format or as a full repository URL.
 					The URL format is useful when the repository is not hosted on github.com.
 
-					To install an extension in development from the current directory, use %[1]s.%[1]s as the
-					value of the repository argument.
+					For local repositories, often used while developing extensions, use %[1]s.%[1]s as the
+					value of the repository argument. Note the following:
+
+					- After installing an extension from a locally cloned repository, the GitHub CLI will
+					manage this extension as a symbolic link (or equivalent mechanism on Windows) pointing
+					to an executable file with the same name as the repository in the repository's root.
+					For example, if the repository is named %[1]sgh-foobar%[1]s, the symbolic link will point
+					to %[1]sgh-foobar%[1]s in the extension repository's root.
+					- When executing the extension, the GitHub CLI will run the executable file found
+					by following the symbolic link. If no executable file is found, the extension
+					will fail to execute.
+					- If the extension is precompiled, the executable file must be built manually and placed
+					in the repository's root.
 
 					For the list of available extensions, see <https://github.com/topics/gh-extension>.
 				`, "`"),
 				Example: heredoc.Doc(`
+					# Install an extension from a remote repository hosted on GitHub
 					$ gh extension install owner/gh-extension
-					$ gh extension install https://git.example.com/owner/gh-extension
+
+					# Install an extension from a remote repository via full URL
+					$ gh extension install https://my.ghes.com/owner/gh-extension
+
+					# Install an extension from a local repository in the current working directory
 					$ gh extension install .
 				`),
 				Args: cmdutil.MinimumArgs(1, "must specify a repository to install from"),
@@ -317,7 +337,21 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 						if err != nil {
 							return err
 						}
-						return m.InstallLocal(wd)
+						_, err = checkValidExtension(cmd.Root(), m, filepath.Base(wd), "")
+						if err != nil {
+							return err
+						}
+
+						err = m.InstallLocal(wd)
+						var ErrExtensionExecutableNotFound *ErrExtensionExecutableNotFound
+						if errors.As(err, &ErrExtensionExecutableNotFound) {
+							cs := io.ColorScheme()
+							if io.IsStdoutTTY() {
+								fmt.Fprintf(io.ErrOut, "%s %s", cs.WarningIcon(), ErrExtensionExecutableNotFound.Error())
+							}
+							return nil
+						}
+						return err
 					}
 
 					repo, err := ghrepo.FromFullName(args[0])
@@ -641,7 +675,7 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 
 func checkValidExtension(rootCmd *cobra.Command, m extensions.ExtensionManager, extName, extOwner string) (extensions.Extension, error) {
 	if !strings.HasPrefix(extName, "gh-") {
-		return nil, errors.New("extension repository name must start with `gh-`")
+		return nil, errors.New("extension name must start with `gh-`")
 	}
 
 	commandName := strings.TrimPrefix(extName, "gh-")
@@ -651,7 +685,7 @@ func checkValidExtension(rootCmd *cobra.Command, m extensions.ExtensionManager, 
 
 	for _, ext := range m.List() {
 		if ext.Name() == commandName {
-			if ext.Owner() == extOwner {
+			if extOwner != "" && ext.Owner() == extOwner {
 				return ext, alreadyInstalledError
 			}
 			return ext, fmt.Errorf("there is already an installed extension that provides the %q command", commandName)

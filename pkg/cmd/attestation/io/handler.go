@@ -37,12 +37,20 @@ func (h *Handler) Printf(f string, v ...interface{}) (int, error) {
 	return fmt.Fprintf(h.IO.ErrOut, f, v...)
 }
 
+func (h *Handler) OutPrintf(f string, v ...interface{}) (int, error) {
+	return fmt.Fprintf(h.IO.Out, f, v...)
+}
+
 // Println writes the arguments to the stderr writer with a newline at the end.
 func (h *Handler) Println(v ...interface{}) (int, error) {
 	if !h.IO.IsStdoutTTY() {
 		return 0, nil
 	}
 	return fmt.Fprintln(h.IO.ErrOut, v...)
+}
+
+func (h *Handler) OutPrintln(v ...interface{}) (int, error) {
+	return fmt.Fprintln(h.IO.Out, v...)
 }
 
 func (h *Handler) VerbosePrint(msg string) (int, error) {
@@ -62,6 +70,10 @@ func (h *Handler) VerbosePrintf(f string, v ...interface{}) (int, error) {
 }
 
 func (h *Handler) PrintTable(headers []string, rows [][]string) error {
+	if !h.IO.IsStdoutTTY() {
+		return nil
+	}
+
 	t := tableprinter.New(h.IO, tableprinter.WithHeader(headers...))
 
 	for _, row := range rows {
