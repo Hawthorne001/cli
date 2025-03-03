@@ -1,7 +1,7 @@
 package verification
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,30 +9,22 @@ import (
 	"path/filepath"
 
 	"github.com/cli/cli/v2/pkg/cmd/attestation/api"
+	"github.com/cli/cli/v2/pkg/cmd/attestation/artifact"
+	"github.com/cli/cli/v2/pkg/cmd/attestation/artifact/oci"
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 )
 
+const SLSAPredicateV1 = "https://slsa.dev/provenance/v1"
+
 var ErrUnrecognisedBundleExtension = errors.New("bundle file extension not supported, must be json or jsonl")
+var ErrEmptyBundleFile = errors.New("provided bundle file is empty")
 
-type FetchAttestationsConfig struct {
-	APIClient  api.Client
-	BundlePath string
-	Digest     string
-	Limit      int
-	Owner      string
-	Repo       string
-}
-
-func (c *FetchAttestationsConfig) IsBundleProvided() bool {
-	return c.BundlePath != ""
-}
-
-func GetAttestations(c FetchAttestationsConfig) ([]*api.Attestation, error) {
-	if c.IsBundleProvided() {
-		return GetLocalAttestations(c.BundlePath)
-	}
-	return GetRemoteAttestations(c)
+type FetchRemoteAttestationsParams struct {
+	Digest string
+	Limit  int
+	Owner  string
+	Repo   string
 }
 
 // GetLocalAttestations returns a slice of attestations read from a local bundle file.
@@ -42,13 +34,25 @@ func GetLocalAttestations(path string) ([]*api.Attestation, error) {
 	case ".json":
 		attestations, err := loadBundleFromJSONFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("bundle could not be loaded from JSON file: %v", err)
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) {
+				return nil, fmt.Errorf("bundle could not be loaded from JSON file at %s", path)
+			} else if errors.Is(err, bundle.ErrValidation) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("bundle content could not be parsed")
 		}
 		return attestations, nil
 	case ".jsonl":
 		attestations, err := loadBundlesFromJSONLinesFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("bundles could not be loaded from JSON lines file: %v", err)
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) {
+				return nil, fmt.Errorf("bundles could not be loaded from JSON lines file at %s", path)
+			} else if errors.Is(err, bundle.ErrValidation) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("bundle content could not be parsed")
 		}
 		return attestations, nil
 	}
@@ -65,54 +69,63 @@ func loadBundleFromJSONFile(path string) ([]*api.Attestation, error) {
 }
 
 func loadBundlesFromJSONLinesFile(path string) ([]*api.Attestation, error) {
-	file, err := os.Open(path)
+	fileContent, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("could not open file: %v", err)
+		return nil, err
 	}
-	defer file.Close()
 
 	attestations := []*api.Attestation{}
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		b := scanner.Bytes()
-		var bundle bundle.ProtobufBundle
-		bundle.Bundle = new(protobundle.Bundle)
-		err = bundle.UnmarshalJSON(b)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal bundle from JSON: %v", err)
+	decoder := json.NewDecoder(bytes.NewReader(fileContent))
+
+	for decoder.More() {
+		var b bundle.Bundle
+		b.Bundle = new(protobundle.Bundle)
+		if err := decoder.Decode(&b); err != nil {
+			return nil, err
 		}
-		a := api.Attestation{Bundle: &bundle}
+		a := api.Attestation{Bundle: &b}
 		attestations = append(attestations, &a)
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	if len(attestations) == 0 {
+		return nil, ErrEmptyBundleFile
 	}
 
 	return attestations, nil
 }
 
-func GetRemoteAttestations(c FetchAttestationsConfig) ([]*api.Attestation, error) {
-	if c.APIClient == nil {
+func GetRemoteAttestations(client api.Client, params FetchRemoteAttestationsParams) ([]*api.Attestation, error) {
+	if client == nil {
 		return nil, fmt.Errorf("api client must be provided")
 	}
 	// check if Repo is set first because if Repo has been set, Owner will be set using the value of Repo.
 	// If Repo is not set, the field will remain empty. It will not be populated using the value of Owner.
-	if c.Repo != "" {
-		attestations, err := c.APIClient.GetByRepoAndDigest(c.Repo, c.Digest, c.Limit)
+	if params.Repo != "" {
+		attestations, err := client.GetByRepoAndDigest(params.Repo, params.Digest, params.Limit)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch attestations from %s: %w", c.Repo, err)
+			return nil, fmt.Errorf("failed to fetch attestations from %s: %w", params.Repo, err)
 		}
 		return attestations, nil
-	} else if c.Owner != "" {
-		attestations, err := c.APIClient.GetByOwnerAndDigest(c.Owner, c.Digest, c.Limit)
+	} else if params.Owner != "" {
+		attestations, err := client.GetByOwnerAndDigest(params.Owner, params.Digest, params.Limit)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch attestations from %s: %w", c.Owner, err)
+			return nil, fmt.Errorf("failed to fetch attestations from %s: %w", params.Owner, err)
 		}
 		return attestations, nil
 	}
 	return nil, fmt.Errorf("owner or repo must be provided")
+}
+
+func GetOCIAttestations(client oci.Client, artifact artifact.DigestedArtifact) ([]*api.Attestation, error) {
+	attestations, err := client.GetAttestations(artifact.NameRef(), artifact.DigestWithAlg())
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch OCI attestations: %w", err)
+	}
+	if len(attestations) == 0 {
+		return nil, fmt.Errorf("no attestations found in the OCI registry. Retry the command without the --bundle-from-oci flag to check GitHub for the attestation")
+	}
+	return attestations, nil
 }
 
 type IntotoStatement struct {
