@@ -103,7 +103,7 @@ type flagView struct {
 var flagsTemplate = `
 <dl class="flags">{{ range . }}
 	<dt>{{ if .Shorthand }}<code>-{{.Shorthand}}</code>, {{ end }}
-		<code>--{{.Name}}{{ if .Varname }} &lt;{{.Varname}}&gt;{{ end }}{{.DefValue}} </code></dt>
+		<code>--{{.Name}}{{ if .Varname }} &lt;{{.Varname}}&gt;{{ end }}{{.DefValue}}</code></dt>
 	<dd>{{.Usage}}</dd>
 {{ end }}</dl>
 `
@@ -142,7 +142,8 @@ func genMarkdownCustom(cmd *cobra.Command, w io.Writer, linkHandler func(string)
 		fmt.Fprintf(w, "```\n%s\n```\n\n", cmd.UseLine())
 	}
 	if hasLong {
-		fmt.Fprintf(w, "%s\n\n", cmd.Long)
+		longWithEscapedPipe := strings.ReplaceAll(cmd.Long, "|", "&#124;")
+		fmt.Fprintf(w, "%s\n\n", longWithEscapedPipe)
 	}
 
 	for _, g := range root.GroupedCommands(cmd) {
